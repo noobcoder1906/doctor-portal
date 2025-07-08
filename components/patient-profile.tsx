@@ -6,35 +6,171 @@ import { Button } from "@/components/ui/button"
 import { Textarea } from "@/components/ui/textarea"
 import { Label } from "@/components/ui/label"
 import { User, Phone, Mail, MapPin, Calendar, Heart, Pill, FileText, Edit, Save } from "lucide-react"
-import { useState } from "react"
+import { useState, useEffect } from "react"
+import { getUserProfile, saveDoctorNotes, addHealthData } from "@/lib/firebase"
+import { useAuth } from "@/lib/firebase-hooks"
+import { getDoc, doc, db, collection, query, where, orderBy, getDocs } from "@/lib/firebase"
 
 interface PatientProfileProps {
   patientId: string
 }
 
 export function PatientProfile({ patientId }: PatientProfileProps) {
+  const { user: currentUser } = useAuth() // Moved useAuth hook to the top level
   const [isEditing, setIsEditing] = useState(false)
   const [notes, setNotes] = useState(
     "Patient shows good compliance with medication regimen. Blood pressure has been stable over the past month. Continue current treatment plan and monitor weekly.",
   )
+  const [patient, setPatient] = useState<any>(null)
+  const [loading, setLoading] = useState(true)
+  const [doctorNotes, setDoctorNotes] = useState<any[]>([])
+  const [healthData, setHealthData] = useState<any[]>([])
 
-  // Mock patient data - in real app, fetch from Firebase
-  const patient = {
-    id: patientId,
-    name: "Sarah Johnson",
-    age: 45,
-    gender: "Female",
-    phone: "+1 (555) 123-4567",
-    email: "sarah.j@email.com",
-    address: "123 Main St, Anytown, ST 12345",
-    emergencyContact: "John Johnson - +1 (555) 987-6543",
-    bloodType: "A+",
-    allergies: ["Penicillin", "Shellfish"],
-    conditions: ["Hypertension", "Type 2 Diabetes"],
-    lastVisit: "2024-01-15",
-    nextAppointment: "2024-01-22",
+  useEffect(() => {
+    const fetchPatientData = async () => {
+      try {
+        console.log("🔄 Fetching patient data for ID:", patientId)
+
+        // Fetch patient profile from users collection
+        const patientDoc = await getDoc(doc(db, "users", patientId))
+
+        if (patientDoc.exists()) {
+          const patientData = patientDoc.data()
+
+          // Fetch doctor's notes - only if current user is a doctor
+          if (currentUser && patientData.assignedDoctors?.includes(currentUser.uid)) {
+            const notesQuery = query(
+              collection(db, "doctorNotes"),
+              where("patientId", "==", patientId),
+              where("doctorId", "==", currentUser.uid),
+              orderBy("createdAt", "desc"),
+            )
+
+            const notesSnapshot = await getDocs(notesQuery)
+            if (!notesSnapshot.empty) {
+              setNotes(notesSnapshot.docs[0].data().notes)
+            }
+          }
+
+          // Fetch appointment history for this patient
+          const appointmentsQuery = query(
+            collection(db, "appointments"),
+            where("patientId", "==", patientId),
+            orderBy("scheduledDate", "desc"),
+          )
+
+          const appointmentsSnapshot = await getDocs(appointmentsQuery)
+          const appointmentsData = appointmentsSnapshot.docs.map((doc) => {
+            const data = doc.data()
+            return {
+              date: data.scheduledDate.toDate().toISOString().split("T")[0],
+              type: data.type,
+              diagnosis: data.diagnosis || "Not specified",
+              treatment: data.treatment || "Not specified",
+              notes: data.notes || "No additional notes",
+            }
+          })
+
+          // Fetch active medications for this patient
+          const medicationsQuery = query(
+            collection(db, "prescriptions"),
+            where("patientId", "==", patientId),
+            where("status", "==", "active"),
+          )
+
+          const medicationsSnapshot = await getDocs(medicationsQuery)
+          const medicationsData = []
+
+          for (const medDoc of medicationsSnapshot.docs) {
+            const medData = medDoc.data()
+            for (const med of medData.medications) {
+              medicationsData.push({
+                name: med.name,
+                dosage: med.dosage,
+                frequency: med.frequency,
+                prescribed: medData.createdAt.toDate().toISOString().split("T")[0],
+                notes: med.instructions || "Take as directed",
+              })
+            }
+          }
+
+          setPatient({
+            id: patientId,
+            name: `${patientData.firstName || "Unknown"} ${patientData.lastName || "User"}`,
+            age: patientData.dateOfBirth ? calculateAge(patientData.dateOfBirth) : "Unknown",
+            gender: patientData.gender || "Not specified",
+            phone: patientData.phone || "Not provided",
+            email: patientData.email || "Not provided",
+            address: "123 Main St, Anytown, ST 12345", // Default address
+            emergencyContact: patientData.emergencyContact?.name
+              ? `${patientData.emergencyContact.name} - ${patientData.emergencyContact.phone}`
+              : "Not specified",
+            bloodType: patientData.bloodType || "Not specified",
+            allergies: patientData.allergies || ["None reported"],
+            conditions: patientData.currentConditions || ["None reported"],
+            lastVisit: "2024-01-15",
+            nextAppointment: "2024-01-22",
+          })
+
+          setLoading(false)
+        } else {
+          console.error("❌ Patient profile not found")
+          setPatient(null)
+          setLoading(false)
+        }
+      } catch (error) {
+        console.error("❌ Error fetching patient data:", error)
+        setLoading(false)
+      }
+    }
+
+    fetchPatientData()
+  }, [patientId])
+
+  const calculateAge = (dateOfBirth: string) => {
+    const today = new Date()
+    const birthDate = new Date(dateOfBirth)
+    let age = today.getFullYear() - birthDate.getFullYear()
+    const m = today.getMonth() - birthDate.getMonth()
+    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+      age--
+    }
+    return age
   }
 
+  const handleSaveNotes = async () => {
+    try {
+      if (currentUser && notes.trim()) {
+        console.log("🔄 Saving notes...")
+
+        // Check if current user is a doctor
+        const userProfile = await getUserProfile(currentUser.uid)
+
+        if (userProfile?.role === "doctor") {
+          await saveDoctorNotes(currentUser.uid, patientId || currentUser.uid, notes)
+          console.log("✅ Doctor notes saved successfully")
+        } else {
+          // If patient is updating their own notes
+          await addHealthData({
+            patientId: patientId || currentUser.uid,
+            type: "other",
+            data: {
+              patientNotes: notes,
+              noteType: "patient_self_note",
+            },
+            notes: "Patient's personal notes updated",
+          })
+          console.log("✅ Patient notes saved successfully")
+        }
+
+        setIsEditing(false)
+      }
+    } catch (error) {
+      console.error("❌ Error saving notes:", error)
+    }
+  }
+
+  // Mock data for demonstration - in real app, this would come from Firebase
   const appointmentHistory = [
     {
       date: "2024-01-15",
@@ -82,6 +218,24 @@ export function PatientProfile({ patientId }: PatientProfileProps) {
       notes: "Cardioprotective therapy",
     },
   ]
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <span className="ml-2 text-gray-600">Loading patient data...</span>
+      </div>
+    )
+  }
+
+  if (!patient) {
+    return (
+      <div className="text-center p-8">
+        <h3 className="text-lg font-medium text-gray-900 mb-2">Patient Not Found</h3>
+        <p className="text-gray-600">Unable to load patient information.</p>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -151,7 +305,7 @@ export function PatientProfile({ patientId }: PatientProfileProps) {
             <div>
               <Label className="text-sm font-medium text-gray-600 mb-2 block">Allergies</Label>
               <div className="flex flex-wrap gap-2">
-                {patient.allergies.map((allergy, index) => (
+                {patient.allergies.map((allergy: string, index: number) => (
                   <Badge key={index} variant="destructive">
                     {allergy}
                   </Badge>
@@ -162,7 +316,7 @@ export function PatientProfile({ patientId }: PatientProfileProps) {
             <div>
               <Label className="text-sm font-medium text-gray-600 mb-2 block">Conditions</Label>
               <div className="flex flex-wrap gap-2">
-                {patient.conditions.map((condition, index) => (
+                {patient.conditions.map((condition: string, index: number) => (
                   <Badge key={index} variant="secondary">
                     {condition}
                   </Badge>
@@ -191,7 +345,17 @@ export function PatientProfile({ patientId }: PatientProfileProps) {
               <FileText className="h-5 w-5 text-green-500" />
               Doctor's Notes
             </CardTitle>
-            <Button variant="outline" size="sm" onClick={() => setIsEditing(!isEditing)}>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                if (isEditing) {
+                  handleSaveNotes()
+                } else {
+                  setIsEditing(true)
+                }
+              }}
+            >
               {isEditing ? (
                 <>
                   <Save className="h-4 w-4 mr-2" />

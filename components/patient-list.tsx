@@ -1,6 +1,6 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
@@ -8,74 +8,189 @@ import { Badge } from "@/components/ui/badge"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Search, Eye, MessageSquare, Calendar, AlertCircle, User, Phone, Mail } from "lucide-react"
 import Link from "next/link"
+import { getDoctorPatients, collection, query, where, orderBy, getDocs, getDoc, doc, db } from "@/lib/firebase"
+import { useAuth } from "@/lib/firebase-hooks"
 
 export function PatientList() {
+  const { user, userProfile } = useAuth()
   const [searchTerm, setSearchTerm] = useState("")
   const [filterCondition, setFilterCondition] = useState("all")
   const [filterUrgency, setFilterUrgency] = useState("all")
+  const [patients, setPatients] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
 
-  const patients = [
-    {
-      id: 1,
-      name: "Sarah Johnson",
-      age: 45,
-      gender: "Female",
-      condition: "Hypertension",
-      urgency: "high",
-      lastVisit: "2024-01-15",
-      nextAppointment: "2024-01-22",
-      phone: "+1 (555) 123-4567",
-      email: "sarah.j@email.com",
-      status: "active",
-      completionRate: 85,
-      alerts: 2,
-    },
-    {
-      id: 2,
-      name: "Michael Chen",
-      age: 38,
-      gender: "Male",
-      condition: "Diabetes",
-      urgency: "medium",
-      lastVisit: "2024-01-10",
-      nextAppointment: "2024-01-25",
-      phone: "+1 (555) 234-5678",
-      email: "m.chen@email.com",
-      status: "active",
-      completionRate: 92,
-      alerts: 0,
-    },
-    {
-      id: 3,
-      name: "Emma Davis",
-      age: 52,
-      gender: "Female",
-      condition: "Heart Disease",
-      urgency: "high",
-      lastVisit: "2024-01-12",
-      nextAppointment: "2024-01-20",
-      phone: "+1 (555) 345-6789",
-      email: "emma.d@email.com",
-      status: "monitoring",
-      completionRate: 78,
-      alerts: 1,
-    },
-    {
-      id: 4,
-      name: "David Wilson",
-      age: 29,
-      gender: "Male",
-      condition: "Asthma",
-      urgency: "low",
-      lastVisit: "2024-01-08",
-      nextAppointment: "2024-02-05",
-      phone: "+1 (555) 456-7890",
-      email: "d.wilson@email.com",
-      status: "stable",
-      completionRate: 95,
-      alerts: 0,
-    },
-  ]
+  // Fetch patients from Firebase
+  useEffect(() => {
+    const fetchPatients = async () => {
+      try {
+        console.log("🔄 Fetching patients from Firebase...")
+        console.log("User:", user?.uid)
+        console.log("User Profile:", userProfile)
+
+        // Only fetch if user is authenticated and is a doctor
+        if (!user) {
+          console.log("❌ No authenticated user")
+          setLoading(false)
+          return
+        }
+
+        if (!userProfile) {
+          console.log("❌ No user profile found")
+          setLoading(false)
+          return
+        }
+
+        if (userProfile.role !== "doctor") {
+          console.log("❌ User is not a doctor, role:", userProfile.role)
+          setLoading(false)
+          return
+        }
+
+        console.log("✅ User is authenticated doctor, fetching patients...")
+
+        // Method 1: Get patients assigned to this doctor using the helper function
+        const doctorPatients = await getDoctorPatients(user.uid)
+        console.log("📋 Assigned patients:", doctorPatients.length)
+        // Note: It's normal to see "0 assigned patients" if patients are only connected through appointments
+        // and not directly assigned to the doctor in the database
+
+        // Method 2: Get patients from appointments with this doctor
+        const appointmentsQuery = query(
+          collection(db, "appointments"),
+          where("doctorId", "==", user.uid),
+          orderBy("scheduledDate", "desc"),
+        )
+        const appointmentsSnapshot = await getDocs(appointmentsQuery)
+
+        console.log("📅 Found appointments:", appointmentsSnapshot.size)
+
+        // Collect unique patient IDs from appointments
+        const appointmentPatientIds = new Set<string>()
+        const appointmentPatientsData = new Map<string, any>()
+
+        for (const appointmentDoc of appointmentsSnapshot.docs) {
+          const appointmentData = appointmentDoc.data()
+          const patientId = appointmentData.patientId
+
+          if (patientId) {
+            appointmentPatientIds.add(patientId)
+
+            // Try to get patient profile from users collection
+            try {
+              const patientDoc = await getDoc(doc(db, "users", patientId))
+              if (patientDoc.exists()) {
+                appointmentPatientsData.set(patientId, {
+                  id: patientId,
+                  ...patientDoc.data(),
+                })
+              } else {
+                // If no profile exists, try to get data from health data
+                const healthDataQuery = query(
+                  collection(db, "healthData"),
+                  where("patientId", "==", patientId),
+                  where("doctorId", "==", user.uid),
+                  orderBy("createdAt", "desc"),
+                )
+                const healthDataSnapshot = await getDocs(healthDataQuery)
+
+                if (!healthDataSnapshot.empty) {
+                  const latestHealthData = healthDataSnapshot.docs[0].data()
+                  const patientData = latestHealthData.data
+
+                  appointmentPatientsData.set(patientId, {
+                    id: patientId,
+                    uid: patientId,
+                    firstName: patientData?.name?.split(" ")[0] || "Unknown",
+                    lastName: patientData?.name?.split(" ").slice(1).join(" ") || "Patient",
+                    email: patientData?.email || "Not provided",
+                    phone: patientData?.phone || "Not provided",
+                    role: "patient",
+                    dateOfBirth: "",
+                    gender: "other",
+                    assignedDoctors: [user.uid],
+                    medicalHistory: [],
+                    currentConditions: [],
+                  })
+                }
+              }
+            } catch (error) {
+              console.error("Error fetching patient data for", patientId, error)
+            }
+          }
+        }
+
+        // Combine patients from both sources
+        const allPatients = new Map<string, any>()
+
+        // Add assigned patients
+        doctorPatients.forEach((patient) => {
+          allPatients.set(patient.id || patient.uid, patient)
+        })
+
+        // Add patients from appointments
+        appointmentPatientsData.forEach((patient, patientId) => {
+          if (!allPatients.has(patientId)) {
+            allPatients.set(patientId, patient)
+          }
+        })
+
+        const combinedPatients = Array.from(allPatients.values())
+
+        if (combinedPatients.length === 0) {
+          console.log("ℹ️ No patients found for this doctor")
+          setPatients([])
+          setLoading(false)
+          return
+        }
+
+        // Transform patient data for display
+        const patientsList = combinedPatients.map((patient) => {
+          // Calculate age from date of birth
+          const age = patient.dateOfBirth ? calculateAge(patient.dateOfBirth) : "Unknown"
+
+          // Generate some sample data for demo purposes
+          const urgency = Math.random() > 0.7 ? "high" : Math.random() > 0.4 ? "medium" : "low"
+          const completionRate = 85 + Math.floor(Math.random() * 15) // Random between 85-100
+          const alerts = urgency === "high" ? Math.floor(Math.random() * 3) + 1 : 0
+
+          // Sample conditions based on common medical conditions
+          const conditions = ["Hypertension", "Diabetes", "Heart Disease", "Asthma", "General"]
+          const condition = conditions[Math.floor(Math.random() * conditions.length)]
+
+          return {
+            id: patient.id || patient.uid,
+            name: `${patient.firstName || "Unknown"} ${patient.lastName || "Patient"}`,
+            age: age,
+            gender: patient.gender || "Not specified",
+            condition: condition,
+            urgency: urgency,
+            lastVisit: "2024-01-15", // Sample date
+            nextAppointment: "2024-02-01", // Sample date
+            phone: patient.phone || "+1 (555) 123-4567",
+            email: patient.email || "Not provided",
+            status: urgency === "high" ? "active" : urgency === "medium" ? "monitoring" : "stable",
+            completionRate: completionRate,
+            alerts: alerts,
+          }
+        })
+
+        setPatients(patientsList)
+        console.log("✅ Fetched", patientsList.length, "patients from Firebase (assigned + appointments)")
+        setLoading(false)
+      } catch (error) {
+        console.error("❌ Error fetching patients:", error)
+        setLoading(false)
+      }
+    }
+
+    // Only fetch if we have user and userProfile
+    if (user && userProfile) {
+      fetchPatients()
+    } else if (!loading) {
+      // If not loading but no user/profile, set loading to false
+      setLoading(false)
+    }
+  }, [user, userProfile])
 
   const filteredPatients = patients.filter((patient) => {
     const matchesSearch =
@@ -112,6 +227,47 @@ export function PatientList() {
       default:
         return "bg-gray-100 text-gray-800"
     }
+  }
+
+  // Helper function to calculate age from date of birth
+  function calculateAge(dateOfBirth: string) {
+    if (!dateOfBirth) return "Unknown"
+    const today = new Date()
+    const birthDate = new Date(dateOfBirth)
+    let age = today.getFullYear() - birthDate.getFullYear()
+    const m = today.getMonth() - birthDate.getMonth()
+    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+      age--
+    }
+    return age
+  }
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <span className="ml-2 text-gray-600">Loading patients...</span>
+      </div>
+    )
+  }
+
+  // Show message if user is not a doctor
+  if (!user || !userProfile || userProfile.role !== "doctor") {
+    return (
+      <Card className="medical-card">
+        <CardContent className="text-center py-8">
+          <AlertCircle className="h-12 w-12 text-yellow-500 mx-auto mb-4" />
+          <h3 className="text-lg font-medium text-gray-900 mb-2">Access Restricted</h3>
+          <p className="text-gray-600">
+            {!user
+              ? "Please sign in to view patients."
+              : !userProfile
+                ? "Loading user profile..."
+                : "Only doctors can access the patient list."}
+          </p>
+        </CardContent>
+      </Card>
+    )
   }
 
   return (
@@ -246,12 +402,16 @@ export function PatientList() {
         ))}
       </div>
 
-      {filteredPatients.length === 0 && (
+      {filteredPatients.length === 0 && !loading && (
         <Card className="medical-card">
           <CardContent className="text-center py-8">
             <User className="h-12 w-12 text-gray-400 mx-auto mb-4" />
             <h3 className="text-lg font-medium text-gray-900 mb-2">No patients found</h3>
-            <p className="text-gray-600">Try adjusting your search or filter criteria.</p>
+            <p className="text-gray-600">
+              {patients.length === 0
+                ? "No patients have been assigned to you yet. Contact your administrator to assign patients."
+                : "Try adjusting your search or filter criteria."}
+            </p>
           </CardContent>
         </Card>
       )}

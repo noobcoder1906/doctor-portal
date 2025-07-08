@@ -1,61 +1,94 @@
 "use client"
 
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Button } from "@/components/ui/button"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Bell, AlertTriangle, Calendar, MessageSquare, Activity } from "lucide-react"
+import { onSnapshot, collection, query, where, orderBy, addDoc, serverTimestamp } from "firebase/firestore"
+import { db } from "@/lib/firebase"
+import { useAuth } from "@/lib/firebase-hooks" // You'll need to create this
 
 export function NotificationCenter() {
-  const [notifications] = useState([
-    {
-      id: 1,
-      type: "alert",
-      title: "Critical Alert: Sarah Johnson",
-      message: "Blood pressure reading above normal range (180/95)",
-      time: "2 minutes ago",
-      read: false,
-      priority: "high",
-    },
-    {
-      id: 2,
-      type: "appointment",
-      title: "Upcoming Appointment",
-      message: "Michael Chen - Follow-up consultation in 30 minutes",
-      time: "28 minutes ago",
-      read: false,
-      priority: "medium",
-    },
-    {
-      id: 3,
-      type: "task",
-      title: "Task Completed",
-      message: "Emma Davis completed daily medication log",
-      time: "1 hour ago",
-      read: true,
-      priority: "low",
-    },
-    {
-      id: 4,
-      type: "message",
-      title: "New Message",
-      message: "Patient inquiry from David Wilson about medication side effects",
-      time: "2 hours ago",
-      read: true,
-      priority: "medium",
-    },
-    {
-      id: 5,
-      type: "alert",
-      title: "Missed Medication Alert",
-      message: "Lisa Brown missed evening medication dose",
-      time: "3 hours ago",
-      read: true,
-      priority: "medium",
-    },
-  ])
+  const { user, userProfile } = useAuth()
+  const [notifications, setNotifications] = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    if (!user || !userProfile) {
+      setLoading(false)
+      return
+    }
+
+    console.log("🔄 Setting up notifications listener for user:", user.uid)
+
+    // Listen to notifications for this user (doctor)
+    const notificationsRef = collection(db, "notifications")
+    const q = query(notificationsRef, where("doctorId", "==", user.uid), orderBy("createdAt", "desc"))
+
+    const unsubscribe = onSnapshot(q, async (querySnapshot) => {
+      console.log("📬 Notifications updated, count:", querySnapshot.size)
+
+      const notificationsData = await Promise.all(
+        querySnapshot.docs.map(async (doc) => {
+          const data = doc.data()
+
+          // Get patient name
+          let patientName = data.patientName || "Unknown Patient"
+          if (!data.patientName && data.patientId) {
+            try {
+              const { getDocs } = await import("firebase/firestore")
+              const patientQuery = query(collection(db, "users"), where("uid", "==", data.patientId))
+              const patientSnapshot = await getDocs(patientQuery)
+
+              if (!patientSnapshot.empty) {
+                const patientData = patientSnapshot.docs[0].data()
+                patientName = `${patientData.firstName} ${patientData.lastName}`
+              }
+            } catch (error) {
+              console.error("Error fetching patient name:", error)
+            }
+          }
+
+          // Calculate time ago
+          const createdAt = data.createdAt?.toDate() || new Date()
+          const now = new Date()
+          const diffTime = Math.abs(now.getTime() - createdAt.getTime())
+          const diffMinutes = Math.ceil(diffTime / (1000 * 60))
+
+          let timeAgo
+          if (diffMinutes < 60) {
+            timeAgo = `${diffMinutes} min ago`
+          } else if (diffMinutes < 1440) {
+            const diffHours = Math.ceil(diffMinutes / 60)
+            timeAgo = `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`
+          } else {
+            const diffDays = Math.ceil(diffMinutes / 1440)
+            timeAgo = `${diffDays} day${diffDays > 1 ? "s" : ""} ago`
+          }
+
+          return {
+            id: doc.id,
+            type: data.type || "appointment",
+            title: data.title || "New Appointment",
+            message: data.message || `${patientName} has booked an appointment`,
+            time: timeAgo,
+            read: data.read || false,
+            priority: data.priority || "medium",
+            patientName: patientName,
+            patientId: data.patientId,
+          }
+        }),
+      )
+
+      setNotifications(notificationsData)
+      setLoading(false)
+    })
+
+    return () => unsubscribe()
+  }, [user, userProfile])
 
   const unreadCount = notifications.filter((n) => !n.read).length
 
@@ -87,6 +120,14 @@ export function NotificationCenter() {
     }
   }
 
+  if (loading) {
+    return (
+      <Button variant="ghost" size="sm" className="relative">
+        <Bell className="h-5 w-5 animate-pulse" />
+      </Button>
+    )
+  }
+
   return (
     <Popover>
       <PopoverTrigger asChild>
@@ -109,35 +150,42 @@ export function NotificationCenter() {
               <CardTitle className="text-lg">Notifications</CardTitle>
               {unreadCount > 0 && <Badge variant="secondary">{unreadCount} new</Badge>}
             </div>
-            <CardDescription>Stay updated with patient alerts and appointments</CardDescription>
+            <CardDescription>Patient appointments and alerts</CardDescription>
           </CardHeader>
           <CardContent className="p-0">
             <ScrollArea className="h-96">
               <div className="space-y-1 p-4">
-                {notifications.map((notification) => (
-                  <div
-                    key={notification.id}
-                    className={`p-3 rounded-lg border-l-4 transition-colors hover:bg-gray-50 cursor-pointer ${getPriorityColor(
-                      notification.priority,
-                    )} ${!notification.read ? "bg-blue-50" : ""}`}
-                  >
-                    <div className="flex items-start space-x-3">
-                      <div className="flex-shrink-0 mt-1">{getNotificationIcon(notification.type)}</div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center justify-between">
-                          <p
-                            className={`text-sm font-medium ${!notification.read ? "text-gray-900" : "text-gray-700"}`}
-                          >
-                            {notification.title}
-                          </p>
-                          {!notification.read && <div className="w-2 h-2 bg-blue-500 rounded-full flex-shrink-0" />}
+                {notifications.length === 0 ? (
+                  <div className="text-center py-8">
+                    <Bell className="h-8 w-8 text-gray-400 mx-auto mb-2" />
+                    <p className="text-sm text-gray-500">No notifications yet</p>
+                  </div>
+                ) : (
+                  notifications.map((notification) => (
+                    <div
+                      key={notification.id}
+                      className={`p-3 rounded-lg border-l-4 transition-colors hover:bg-gray-50 cursor-pointer ${getPriorityColor(
+                        notification.priority,
+                      )} ${!notification.read ? "bg-blue-50" : ""}`}
+                    >
+                      <div className="flex items-start space-x-3">
+                        <div className="flex-shrink-0 mt-1">{getNotificationIcon(notification.type)}</div>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center justify-between">
+                            <p
+                              className={`text-sm font-medium ${!notification.read ? "text-gray-900" : "text-gray-700"}`}
+                            >
+                              {notification.title}
+                            </p>
+                            {!notification.read && <div className="w-2 h-2 bg-blue-500 rounded-full flex-shrink-0" />}
+                          </div>
+                          <p className="text-sm text-gray-600 mt-1">{notification.message}</p>
+                          <p className="text-xs text-gray-500 mt-2">{notification.time}</p>
                         </div>
-                        <p className="text-sm text-gray-600 mt-1">{notification.message}</p>
-                        <p className="text-xs text-gray-500 mt-2">{notification.time}</p>
                       </div>
                     </div>
-                  </div>
-                ))}
+                  ))
+                )}
               </div>
             </ScrollArea>
             <div className="p-4 border-t">
@@ -150,4 +198,29 @@ export function NotificationCenter() {
       </PopoverContent>
     </Popover>
   )
+}
+
+// Function to create notification when patient books appointment
+export const createAppointmentNotification = async (doctorId: string, patientId: string, appointmentData: any) => {
+  try {
+    console.log("🔔 Creating appointment notification for doctor:", doctorId)
+
+    await addDoc(collection(db, "notifications"), {
+      doctorId: doctorId,
+      patientId: patientId,
+      type: "appointment",
+      title: "New Appointment Booked",
+      message: `A patient has booked an appointment for ${appointmentData.type || "consultation"}`,
+      priority: appointmentData.urgency_level === "emergency" ? "high" : "medium",
+      read: false,
+      createdAt: serverTimestamp(),
+      appointmentId: appointmentData.appointmentId,
+      appointmentType: appointmentData.type,
+      scheduledDate: appointmentData.scheduledDate,
+    })
+
+    console.log("✅ Notification created successfully")
+  } catch (error) {
+    console.error("❌ Error creating notification:", error)
+  }
 }

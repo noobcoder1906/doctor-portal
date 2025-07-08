@@ -4,84 +4,291 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Badge } from "@/components/ui/badge"
 import { Progress } from "@/components/ui/progress"
 import { Users, Calendar, AlertTriangle, TrendingUp, Heart, Activity, Clock, CheckCircle } from "lucide-react"
+import { useState, useEffect } from "react"
+import { collection, query, where, getDocs, orderBy, limit, addDoc, serverTimestamp } from "firebase/firestore"
+import { db } from "@/lib/firebase"
+import { useAuth } from "@/lib/firebase-hooks"
 
 export function DashboardOverview() {
-  const stats = [
+  const { user, userProfile } = useAuth()
+  const [stats, setStats] = useState([
     {
       title: "Total Patients",
-      value: "247",
-      change: "+12%",
+      value: "0",
+      change: "0%",
       icon: Users,
       color: "text-blue-600",
       bgColor: "bg-blue-50",
     },
     {
       title: "Today's Appointments",
-      value: "18",
-      change: "+3",
+      value: "0",
+      change: "0",
       icon: Calendar,
       color: "text-green-600",
       bgColor: "bg-green-50",
     },
     {
       title: "Critical Alerts",
-      value: "5",
-      change: "-2",
+      value: "0",
+      change: "0",
       icon: AlertTriangle,
       color: "text-red-600",
       bgColor: "bg-red-50",
     },
     {
       title: "Task Completion",
-      value: "89%",
-      change: "+5%",
+      value: "0%",
+      change: "0%",
       icon: TrendingUp,
       color: "text-purple-600",
       bgColor: "bg-purple-50",
     },
-  ]
+  ])
 
-  const recentAlerts = [
-    {
-      patient: "Sarah Johnson",
-      condition: "High Blood Pressure",
-      severity: "critical",
-      time: "2 min ago",
-    },
-    {
-      patient: "Michael Chen",
-      condition: "Missed Medication",
-      severity: "warning",
-      time: "15 min ago",
-    },
-    {
-      patient: "Emma Davis",
-      condition: "Task Overdue",
-      severity: "normal",
-      time: "1 hour ago",
-    },
-  ]
+  const [recentAlerts, setRecentAlerts] = useState<any[]>([])
+  const [upcomingAppointments, setUpcomingAppointments] = useState<any[]>([])
+  const [loading, setLoading] = useState(true)
 
-  const upcomingAppointments = [
-    {
-      time: "09:00 AM",
-      patient: "John Smith",
-      type: "Follow-up",
-      condition: "Diabetes",
-    },
-    {
-      time: "10:30 AM",
-      patient: "Lisa Brown",
-      type: "Consultation",
-      condition: "Hypertension",
-    },
-    {
-      time: "02:00 PM",
-      patient: "David Wilson",
-      type: "Check-up",
-      condition: "Heart Disease",
-    },
-  ]
+  useEffect(() => {
+    const fetchDashboardData = async () => {
+      try {
+        console.log("🔄 Fetching dashboard data...")
+
+        // Get current doctor ID from authenticated user
+        if (!user || !userProfile || userProfile.role !== "doctor") {
+          console.log("❌ No authenticated doctor found")
+          setLoading(false)
+          return
+        }
+
+        const doctorId = user.uid
+        console.log("✅ Using doctor ID:", doctorId)
+
+        // Record dashboard view in Firebase
+        await addDoc(collection(db, "dashboardViews"), {
+          doctorId: doctorId,
+          viewedAt: serverTimestamp(),
+        })
+
+        // Fetch patients assigned to this doctor
+        const patientsQuery = query(
+          collection(db, "users"),
+          where("role", "==", "patient"),
+          where("assignedDoctors", "array-contains", doctorId),
+        )
+
+        const patientsSnapshot = await getDocs(patientsQuery)
+        const patientCount = patientsSnapshot.size
+
+        // Fetch today's appointments for this doctor
+        const today = new Date()
+        today.setHours(0, 0, 0, 0)
+        const tomorrow = new Date(today)
+        tomorrow.setDate(tomorrow.getDate() + 1)
+
+        const appointmentsQuery = query(
+          collection(db, "appointments"),
+          where("doctorId", "==", doctorId),
+          where("scheduledDate", ">=", today),
+          where("scheduledDate", "<", tomorrow),
+        )
+
+        const appointmentsSnapshot = await getDocs(appointmentsQuery)
+        const appointmentCount = appointmentsSnapshot.size
+
+        // Fetch critical alerts for this doctor's patients
+        const alertsQuery = query(
+          collection(db, "healthAlerts"),
+          where("severity", "==", "critical"),
+          where("doctorId", "==", doctorId),
+        )
+
+        const alertsSnapshot = await getDocs(alertsQuery)
+        const alertCount = alertsSnapshot.size
+
+        // Fetch task completion rate
+        const tasksQuery = query(collection(db, "taskCompletions"), orderBy("weekStarting", "desc"), limit(1))
+
+        const tasksSnapshot = await getDocs(tasksQuery)
+        let completionRate = 0
+
+        if (!tasksSnapshot.empty) {
+          completionRate = tasksSnapshot.docs[0].data().completedPercentage
+        }
+
+        // Update stats
+        setStats([
+          {
+            title: "Total Patients",
+            value: patientCount.toString(),
+            change: "+12%", // In a real app, calculate this
+            icon: Users,
+            color: "text-blue-600",
+            bgColor: "bg-blue-50",
+          },
+          {
+            title: "Today's Appointments",
+            value: appointmentCount.toString(),
+            change: "+3", // In a real app, calculate this
+            icon: Calendar,
+            color: "text-green-600",
+            bgColor: "bg-green-50",
+          },
+          {
+            title: "Critical Alerts",
+            value: alertCount.toString(),
+            change: "-2", // In a real app, calculate this
+            icon: AlertTriangle,
+            color: "text-red-600",
+            bgColor: "bg-red-50",
+          },
+          {
+            title: "Task Completion",
+            value: `${completionRate}%`,
+            change: "+5%", // In a real app, calculate this
+            icon: TrendingUp,
+            color: "text-purple-600",
+            bgColor: "bg-purple-50",
+          },
+        ])
+
+        // Fetch recent health alerts for this doctor's patients (real data)
+        const recentAlertsQuery = query(
+          collection(db, "notifications"),
+          where("doctorId", "==", doctorId),
+          where("type", "==", "alert"),
+          orderBy("createdAt", "desc"),
+          limit(3),
+        )
+
+        const recentAlertsSnapshot = await getDocs(recentAlertsQuery)
+
+        if (!recentAlertsSnapshot.empty) {
+          const alertsData = await Promise.all(
+            recentAlertsSnapshot.docs.map(async (doc) => {
+              const data = doc.data()
+
+              // Get patient name
+              let patientName = "Unknown Patient"
+              try {
+                const patientDoc = await getDocs(query(collection(db, "users"), where("uid", "==", data.patientId)))
+
+                if (!patientDoc.empty) {
+                  const patientData = patientDoc.docs[0].data()
+                  patientName = `${patientData.firstName} ${patientData.lastName}`
+                }
+              } catch (error) {
+                console.error("Error fetching patient name:", error)
+              }
+
+              // Calculate time ago
+              const createdAt = data.createdAt.toDate()
+              const now = new Date()
+              const diffTime = Math.abs(now.getTime() - createdAt.getTime())
+              const diffMinutes = Math.ceil(diffTime / (1000 * 60))
+
+              let timeAgo
+              if (diffMinutes < 60) {
+                timeAgo = `${diffMinutes} min ago`
+              } else {
+                const diffHours = Math.ceil(diffMinutes / 60)
+                timeAgo = `${diffHours} hour${diffHours > 1 ? "s" : ""} ago`
+              }
+
+              return {
+                patient: patientName,
+                condition: data.message || "Health Alert",
+                severity: data.priority || "medium",
+                time: timeAgo,
+              }
+            }),
+          )
+
+          setRecentAlerts(alertsData)
+        } else {
+          // If no real alerts, show empty state
+          setRecentAlerts([])
+        }
+
+        // Fetch upcoming appointments for this doctor (real data)
+        const upcomingAppointmentsQuery = query(
+          collection(db, "appointments"),
+          where("doctorId", "==", doctorId),
+          where("scheduledDate", ">=", today),
+          orderBy("scheduledDate", "asc"),
+          limit(5),
+        )
+
+        const upcomingAppointmentsSnapshot = await getDocs(upcomingAppointmentsQuery)
+
+        const appointmentsData = await Promise.all(
+          upcomingAppointmentsSnapshot.docs.map(async (doc) => {
+            const data = doc.data()
+
+            // Get patient name
+            let patientName = "Unknown Patient"
+            let patientEmail = "Not provided"
+
+            try {
+              const patientDoc = await getDocs(query(collection(db, "users"), where("uid", "==", data.patientId)))
+
+              if (!patientDoc.empty) {
+                const patientData = patientDoc.docs[0].data()
+                patientName = `${patientData.firstName} ${patientData.lastName}`
+                patientEmail = patientData.email || "Not provided"
+              }
+            } catch (error) {
+              console.error("Error fetching patient details:", error)
+            }
+
+            // Format time
+            const scheduledDate = data.scheduledDate.toDate()
+            const timeString = scheduledDate.toLocaleTimeString("en-US", {
+              hour: "2-digit",
+              minute: "2-digit",
+              hour12: true,
+            })
+
+            const dateString = scheduledDate.toLocaleDateString("en-US", {
+              month: "short",
+              day: "numeric",
+            })
+
+            return {
+              id: doc.id,
+              time: timeString,
+              date: dateString,
+              patient: patientName,
+              email: patientEmail,
+              type: data.type || "Consultation",
+              status: data.status || "scheduled",
+              notes: data.notes || "",
+            }
+          }),
+        )
+
+        setUpcomingAppointments(appointmentsData)
+
+        console.log("✅ Dashboard data loaded successfully")
+        setLoading(false)
+      } catch (error) {
+        console.error("❌ Error fetching dashboard data:", error)
+        setLoading(false)
+      }
+    }
+
+    fetchDashboardData()
+  }, [user, userProfile])
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center p-8">
+        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600"></div>
+        <span className="ml-2 text-gray-600">Loading dashboard...</span>
+      </div>
+    )
+  }
 
   return (
     <div className="space-y-6">
@@ -224,7 +431,7 @@ export function DashboardOverview() {
           <CardContent>
             <div className="text-2xl font-bold text-gray-900 mb-2">89%</div>
             <Progress value={89} className="mb-2" />
-            <p className="text-sm text-gray-600">Patient adherence rate</p>
+            <p className="text-xs text-gray-500">Patient adherence rate</p>
           </CardContent>
         </Card>
       </div>

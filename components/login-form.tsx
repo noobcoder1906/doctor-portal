@@ -4,8 +4,7 @@ import type React from "react"
 
 import { useState } from "react"
 import { useRouter } from "next/navigation"
-import { signInWithEmailAndPassword } from "firebase/auth"
-import { auth } from "@/lib/firebase"
+import { signInUser } from "@/lib/firebase"
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
@@ -26,10 +25,21 @@ export function LoginForm() {
     setError("")
 
     try {
-      await signInWithEmailAndPassword(auth, email, password)
-      router.push("/dashboard")
+      await signInUser(email, password)
+      // Router will be handled by the auth provider
     } catch (error: any) {
-      setError("Invalid email or password. Please try again.")
+      console.error("Login error:", error)
+      if (error.code === "auth/user-not-found") {
+        setError("No account found with this email address")
+      } else if (error.code === "auth/wrong-password") {
+        setError("Incorrect password")
+      } else if (error.code === "auth/invalid-email") {
+        setError("Invalid email address")
+      } else if (error.code === "auth/too-many-requests") {
+        setError("Too many failed attempts. Please try again later")
+      } else {
+        setError("Invalid email or password. Please try again.")
+      }
     } finally {
       setLoading(false)
     }
@@ -44,7 +54,7 @@ export function LoginForm() {
           <Input
             id="email"
             type="email"
-            placeholder="doctor@hospital.com"
+            placeholder="your@email.com"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             className="pl-10"
@@ -87,12 +97,6 @@ export function LoginForm() {
       <Button type="submit" className="w-full" disabled={loading}>
         {loading ? "Signing in..." : "Sign In"}
       </Button>
-
-      <div className="text-center text-sm text-gray-600">
-        <p>Demo Credentials:</p>
-        <p>Email: doctor@medicare.com</p>
-        <p>Password: doctor123</p>
-      </div>
     </form>
   )
 }

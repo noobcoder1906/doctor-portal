@@ -1,7 +1,7 @@
 "use client"
 
 import { useEffect, useState } from "react"
-import { useAuth } from "@/lib/firebase-hooks"
+import { useAuth } from "@/hooks/use-auth"
 import { useRouter } from "next/navigation"
 import { DashboardLayout } from "@/components/dashboard-layout"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -13,11 +13,14 @@ import { Switch } from "@/components/ui/switch"
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { Settings, User, Bell, Shield, Palette, Save } from "lucide-react"
-import { updateUserProfile } from "@/lib/firebase"
+import { createDoctorProfile, updateDoctorProfile, getDoctorProfile, type Doctor } from "@/lib/firebase"
+import { useToast } from "@/hooks/use-toast"
 
 export default function SettingsPage() {
-  const { user, userProfile, loading } = useAuth()
+  const { user, loading } = useAuth()
   const router = useRouter()
+  const { toast } = useToast()
+  const [doctorId, setDoctorId] = useState<string>()
   const [profile, setProfile] = useState({
     displayName: "",
     email: "",
@@ -38,17 +41,106 @@ export default function SettingsPage() {
     if (!loading && !user) {
       router.push("/")
     }
-    if (user && userProfile) {
-      setProfile({
-        displayName: `${userProfile.firstName || ""} ${userProfile.lastName || ""}`.trim(),
-        email: userProfile.email || "",
-        phone: userProfile.phone || "",
-        specialty: (userProfile as any).specialization || "",
-        license: (userProfile as any).licenseNumber || "",
-        bio: (userProfile as any).bio || "",
+    if (user) {
+      loadDoctorProfile()
+    }
+  }, [user, loading, router])
+
+  const loadDoctorProfile = async () => {
+    if (!user) return
+
+    try {
+      const doctorProfile = await getDoctorProfile(user.uid)
+
+      if (doctorProfile) {
+        setDoctorId(doctorProfile.id!)
+        setProfile({
+          displayName: doctorProfile.name || "",
+          email: doctorProfile.email || "",
+          phone: doctorProfile.phone || "",
+          specialty: doctorProfile.specialty || "",
+          license: doctorProfile.license || "",
+          bio: doctorProfile.bio || "",
+        })
+
+        if (doctorProfile.preferences) {
+          setNotifications({
+            criticalAlerts: doctorProfile.preferences.criticalAlerts,
+            appointmentReminders: doctorProfile.preferences.appointmentReminders,
+            taskUpdates: doctorProfile.preferences.taskUpdates,
+            emailNotifications: doctorProfile.preferences.emailNotifications,
+            smsNotifications: doctorProfile.preferences.smsNotifications,
+          })
+        }
+      }
+    } catch (error) {
+      console.error("Error loading doctor profile:", error)
+      toast({
+        title: "Error",
+        description: "Failed to load doctor profile",
+        variant: "destructive",
       })
     }
-  }, [user, userProfile, loading, router])
+  }
+
+  const handleProfileSave = async () => {
+    if (!user) return
+
+    try {
+      const doctorData = {
+        uid: user.uid,
+        name: profile.displayName,
+        email: profile.email,
+        phone: profile.phone,
+        specialty: profile.specialty,
+        license: profile.license,
+        bio: profile.bio,
+      }
+
+      if (doctorId) {
+        // Update existing doctor
+        await updateDoctorProfile(doctorId, doctorData)
+      } else {
+        // Create new doctor
+        const newDoctorId = await createDoctorProfile(doctorData as Omit<Doctor, "createdAt" | "updatedAt">)
+        setDoctorId(newDoctorId)
+      }
+
+      toast({
+        title: "Success",
+        description: "Profile updated successfully",
+      })
+    } catch (error) {
+      console.error("Error saving profile:", error)
+      toast({
+        title: "Error",
+        description: "Failed to save profile",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const handleNotificationSave = async () => {
+    if (!doctorId) return
+
+    try {
+      await updateDoctorProfile(doctorId, {
+        preferences: notifications,
+      })
+
+      toast({
+        title: "Success",
+        description: "Notification preferences updated successfully",
+      })
+    } catch (error) {
+      console.error("Error saving notification preferences:", error)
+      toast({
+        title: "Error",
+        description: "Failed to save notification preferences",
+        variant: "destructive",
+      })
+    }
+  }
 
   if (loading) {
     return (
@@ -60,34 +152,6 @@ export default function SettingsPage() {
 
   if (!user) {
     return null
-  }
-
-  const handleProfileSave = async () => {
-    try {
-      if (user) {
-        const [firstName, ...lastNameParts] = profile.displayName.split(" ")
-        const lastName = lastNameParts.join(" ")
-
-        await updateUserProfile(user.uid, {
-          firstName: firstName || "",
-          lastName: lastName || "",
-          phone: profile.phone,
-          ...(userProfile?.role === "doctor" && {
-            specialization: profile.specialty,
-            licenseNumber: profile.license,
-            bio: profile.bio,
-          }),
-        })
-        console.log("Profile updated successfully")
-      }
-    } catch (error) {
-      console.error("Error updating profile:", error)
-    }
-  }
-
-  const handleNotificationSave = () => {
-    // In real app, save notification preferences
-    console.log("Saving notifications:", notifications)
   }
 
   return (
@@ -139,7 +203,6 @@ export default function SettingsPage() {
                       value={profile.email}
                       onChange={(e) => setProfile({ ...profile, email: e.target.value })}
                       placeholder="doctor@hospital.com"
-                      disabled
                     />
                   </div>
                 </div>
